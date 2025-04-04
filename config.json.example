@@ -1,0 +1,15 @@
+{
+    "vcenter": {
+        "ip": "vcenter.example.com",
+        "user": "administrator@vsphere.local",
+        "password": "your-password",
+        "datacenter": "your-datacenter",
+        "folder": "optional/folder/path"
+    },
+    "server": {
+        "ip_range": {
+            "start": "192.168.1.100",
+            "end": "192.168.1.200"
+        }
+    }
+}
