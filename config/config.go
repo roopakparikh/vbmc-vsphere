@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+
+	"github.com/sirupsen/logrus"
 )
 
 // VCenterConfig holds the vCenter specific configuration
@@ -24,19 +26,41 @@ type IPRange struct {
 }
 
 // ServerConfig holds the BMC server configuration
+// LogConfig holds logging configuration
+type LogConfig struct {
+	Level string `json:"level"` // debug, info, warn, error
+}
+
+// NetworkConfig holds network-specific configuration
+type NetworkConfig struct {
+	Netmask string `json:"netmask"`
+	Gateway string `json:"gateway"`
+}
+
+// ServerConfig holds the BMC server configuration
 type ServerConfig struct {
-	IPRange IPRange `json:"ip_range"`
+	IPRange  IPRange      `json:"ip_range"`
+	NIC      string       `json:"nic"` // Network interface to bind IPs to
+	Network  NetworkConfig `json:"network"`
 }
 
 // Config holds the complete configuration for the virtual BMC
 type Config struct {
 	VCenter VCenterConfig `json:"vcenter"`
 	Server  ServerConfig  `json:"server"`
+	Logging LogConfig     `json:"logging,omitempty"`
 }
 
 // NewConfig creates a new configuration with default values
 func NewConfig() *Config {
-	return &Config{}
+	return &Config{
+		Logging: LogConfig{
+			Level: "info", // default log level
+		},
+		Server: ServerConfig{
+			NIC: "eth0", // default network interface
+		},
+	}
 }
 
 // LoadFromFile loads configuration from a JSON file
@@ -59,6 +83,20 @@ func LoadFromFile(path string) (*Config, error) {
 }
 
 // Validate checks if the configuration is valid
+// GetLogLevel returns the log level as a logrus.Level
+func (c *Config) GetLogLevel() logrus.Level {
+	switch c.Logging.Level {
+	case "debug":
+		return logrus.DebugLevel
+	case "warn":
+		return logrus.WarnLevel
+	case "error":
+		return logrus.ErrorLevel
+	default:
+		return logrus.InfoLevel
+	}
+}
+
 func (c *Config) Validate() error {
 	// Validate vCenter configuration
 	if c.VCenter.IP == "" {
@@ -80,6 +118,45 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.IPRange.End == "" {
 		return fmt.Errorf("server.ip_range.end is required")
+	}
+
+	// Validate NIC
+	if c.Server.NIC == "" {
+		return fmt.Errorf("server.nic is required")
+	}
+
+	// Validate network configuration
+	if c.Server.Network.Netmask == "" {
+		return fmt.Errorf("server.network.netmask is required")
+	}
+	// Validate netmask format
+	netmask := net.ParseIP(c.Server.Network.Netmask)
+	if netmask == nil {
+		return fmt.Errorf("invalid netmask: %s", c.Server.Network.Netmask)
+	}
+
+	// Validate gateway if provided
+	if c.Server.Network.Gateway != "" {
+		gateway := net.ParseIP(c.Server.Network.Gateway)
+		if gateway == nil {
+			return fmt.Errorf("invalid gateway: %s", c.Server.Network.Gateway)
+		}
+	}
+
+	// Check if the network interface exists
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return fmt.Errorf("failed to list network interfaces: %v", err)
+	}
+	nicExists := false
+	for _, iface := range interfaces {
+		if iface.Name == c.Server.NIC {
+			nicExists = true
+			break
+		}
+	}
+	if !nicExists {
+		return fmt.Errorf("network interface %s does not exist", c.Server.NIC)
 	}
 
 	// Validate IP addresses

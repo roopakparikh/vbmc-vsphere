@@ -51,19 +51,28 @@ func main() {
 	}
 
 	log := logrus.New()
-	log.SetLevel(logrus.InfoLevel)
+	log.SetLevel(cfg.GetLogLevel())
+	log.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp: true,
+		TimestampFormat: "2006-01-02 15:04:05",
+	})
+	log.Info("Starting vBMC-vSphere service")
+	log.Infof("Using config file: %s", *configFile)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Create vSphere client
+	log.Info("Connecting to vSphere...")
 	vsClient, err := vsphere.NewClient(ctx, cfg.VCenter.IP, cfg.VCenter.User, cfg.VCenter.Password, cfg.VCenter.Datacenter)
 	if err != nil {
 		log.Fatalf("Failed to create vSphere client: %v", err)
 	}
 
 	// Get list of VMs
+	log.Infof("Retrieving VMs from folder: %s", cfg.VCenter.Folder)
 	vms, err := vsClient.GetVMs(ctx, cfg.VCenter.Folder)
+	log.Infof("Found %d VMs", len(vms))
 	if err != nil {
 		log.Fatalf("Failed to get VMs: %v", err)
 	}
@@ -82,11 +91,31 @@ func main() {
 	var wg sync.WaitGroup
 	servers := make([]*ipmi.Server, len(vms))
 
+	// Parse netmask
+	netmask := net.ParseIP(cfg.Server.Network.Netmask)
+	if netmask == nil {
+		log.Fatalf("Failed to parse netmask: %s", cfg.Server.Network.Netmask)
+	}
+
+	// Track used IPs to avoid conflicts
+	usedIPs := make(map[string]bool)
+
 	currentIP := make(net.IP, len(startIP))
 	copy(currentIP, startIP)
 
 	for i, vm := range vms {
-		server := ipmi.NewServer(vm, vsClient, currentIP)
+		// Check if IP is already in use
+		ipStr := currentIP.String()
+		for usedIPs[ipStr] {
+			incrementIP(currentIP)
+			ipStr = currentIP.String()
+			if currentIP.Equal(endIP) {
+				log.Fatalf("No more available IPs in range")
+			}
+		}
+		usedIPs[ipStr] = true
+
+		server := ipmi.NewServer(vm, vsClient, currentIP, netmask, cfg.Server.NIC)
 		servers[i] = server
 
 		wg.Add(1)

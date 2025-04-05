@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
@@ -17,32 +19,41 @@ type Client struct {
 	client     *govmomi.Client
 	finder     *find.Finder
 	datacenter *object.Datacenter
+	log        *logrus.Entry
 }
 
 // NewClient creates a new vSphere client
 func NewClient(ctx context.Context, vcenterIP, username, password, datacenter string) (*Client, error) {
+	log := logrus.WithField("component", "vsphere")
+	log.Debugf("Connecting to vCenter at %s", vcenterIP)
 	u, err := url.Parse(fmt.Sprintf("https://%s/sdk", vcenterIP))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse vCenter URL: %v", err)
 	}
 	u.User = url.UserPassword(username, password)
 
+	log.Debug("Creating new govmomi client")
 	client, err := govmomi.NewClient(ctx, u, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create vSphere client: %v", err)
 	}
 
+	log.Debug("Creating new Finder")
 	finder := find.NewFinder(client.Client, true)
+
+	log.Debugf("Looking for datacenter: %s", datacenter)
 	dc, err := finder.Datacenter(ctx, datacenter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find datacenter: %v", err)
 	}
 	finder.SetDatacenter(dc)
 
+	log.Info("Successfully connected to vSphere")
 	return &Client{
 		client:     client,
 		finder:     finder,
 		datacenter: dc,
+		log:        log,
 	}, nil
 }
 
@@ -52,7 +63,7 @@ func (c *Client) GetVMs(ctx context.Context, folderPath string) ([]*object.Virtu
 	var err error
 
 	if folderPath != "" {
-		folder, err := c.finder.Folder(ctx, folderPath)
+		folder, err := c.finder.Folder(ctx, "/"+c.datacenter.Name()+"/vm"+folderPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find folder: %v", err)
 		}

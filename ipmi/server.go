@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os/exec"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vmware/govmomi/object"
@@ -16,21 +17,69 @@ type Server struct {
 	vsClient *vsphere.Client
 	conn     *net.UDPConn
 	ip       net.IP
+	netmask  net.IP
+	nic      string
 	log      *logrus.Entry
 }
 
 // NewServer creates a new IPMI server instance
-func NewServer(vm *object.VirtualMachine, vsClient *vsphere.Client, ip net.IP) *Server {
+func NewServer(vm *object.VirtualMachine, vsClient *vsphere.Client, ip net.IP, netmask net.IP, nic string) *Server {
 	return &Server{
 		vm:       vm,
 		vsClient: vsClient,
 		ip:       ip,
+		netmask:  netmask,
+		nic:      nic,
 		log:      logrus.WithField("vm", vm.Name()),
 	}
 }
 
 // Start starts the IPMI server
+// configureIP configures the IP address on the specified network interface
+func (s *Server) configureIP() error {
+	// Use ip command to add IP address
+	cmd := exec.Command("ip", "addr", "add", 
+		fmt.Sprintf("%s/%s", s.ip.String(), s.netmask.String()), 
+		"dev", s.nic)
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to configure IP %s on %s: %v - %s", 
+			s.ip.String(), s.nic, err, string(output))
+	}
+
+	s.log.Infof("Configured IP %s with netmask %s on interface %s", 
+		s.ip.String(), s.netmask.String(), s.nic)
+	return nil
+}
+
+// cleanupIP removes the IP address from the network interface
+func (s *Server) cleanupIP() error {
+	if s.ip == nil || s.nic == "" {
+		return nil
+	}
+
+	cmd := exec.Command("ip", "addr", "del", 
+		fmt.Sprintf("%s/%s", s.ip.String(), s.netmask.String()), 
+		"dev", s.nic)
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		s.log.Errorf("Failed to remove IP %s from %s: %v - %s", 
+			s.ip.String(), s.nic, err, string(output))
+		return err
+	}
+
+	s.log.Infof("Removed IP %s from interface %s", s.ip.String(), s.nic)
+	return nil
+}
+
 func (s *Server) Start(ctx context.Context) error {
+	// Configure IP address on the interface
+	if err := s.configureIP(); err != nil {
+		return fmt.Errorf("failed to configure IP: %v", err)
+	}
+
 	addr := &net.UDPAddr{
 		Port: 623, // Standard IPMI port
 		IP:   s.ip,
@@ -66,9 +115,11 @@ func (s *Server) handleConnections(ctx context.Context) {
 }
 
 func (s *Server) handleIPMIRequest(ctx context.Context, data []byte, remoteAddr *net.UDPAddr) {
+	s.log.Debugf("Received IPMI request from %s, length: %d bytes", remoteAddr.String(), len(data))
+
 	// Basic IPMI message parsing
 	if len(data) < 4 {
-		s.log.Error("Invalid IPMI message: too short")
+		s.log.Errorf("Invalid IPMI message from %s: too short (%d bytes)", remoteAddr.String(), len(data))
 		return
 	}
 
@@ -92,12 +143,16 @@ func (s *Server) handleIPMIRequest(ctx context.Context, data []byte, remoteAddr 
 }
 
 func (s *Server) processIPMICommand(ctx context.Context, command byte, params []byte) []byte {
+	s.log.Debugf("Processing IPMI command: 0x%02x with %d parameter bytes", command, len(params))
+
 	switch command {
 	case 0x01: // Get Device ID
 		return []byte{0x00, 0x01, 0x00, 0x00} // Simple response
 
 	case 0x02: // Get Power State
+		s.log.Debug("Getting VM power state")
 		powerState, err := s.vsClient.GetVMPowerState(ctx, s.vm)
+		s.log.Debugf("VM power state: %s", powerState)
 		if err != nil {
 			s.log.Errorf("Failed to get power state: %v", err)
 			return []byte{0x01} // Error response
@@ -162,8 +217,18 @@ func (s *Server) processIPMICommand(ctx context.Context, command byte, params []
 }
 
 // Stop stops the IPMI server
-func (s *Server) Stop() {
+func (s *Server) Stop() error {
+	// First close the connection
 	if s.conn != nil {
-		s.conn.Close()
+		if err := s.conn.Close(); err != nil {
+			s.log.Errorf("Failed to close connection: %v", err)
+		}
 	}
+
+	// Then remove the IP address
+	if err := s.cleanupIP(); err != nil {
+		return fmt.Errorf("failed to cleanup IP: %v", err)
+	}
+
+	return nil
 }
