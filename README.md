@@ -28,9 +28,13 @@ Create a JSON configuration file (e.g., `config.json`) with the following struct
         "datacenter": "your-datacenter",
         "folder": "optional/folder/path"
     },
-    "server": {
-        "listen_ip": "0.0.0.0",
-        "start_port": 6230
+    "ipmi": {
+        "interface": "ens33",
+        "ip_range": {
+            "start": "192.168.1.200",
+            "end": "192.168.1.250"
+        },
+        "netmask": "255.255.255.0"
     }
 }
 ```
@@ -44,12 +48,14 @@ Create a JSON configuration file (e.g., `config.json`) with the following struct
 - `datacenter`: vCenter datacenter name (required)
 - `folder`: vCenter folder path to filter VMs (optional)
 
-#### Server Section
+#### IPMI Section
+- `interface`: Network interface to configure IPMI addresses on (required)
 - `ip_range`: Configuration for the IP address range
   - `start`: First IP address in the range (required)
   - `end`: Last IP address in the range (required)
+- `netmask`: Network mask for the IPMI addresses (required)
 
-The virtual BMC will assign one IP address from the range to each VM. Each BMC will listen on the standard IPMI port (623).
+The virtual BMC will assign one IP address from the range to each VM. Each BMC will listen on the standard IPMI port (623) using the specified network interface.
 
 An example configuration file is provided as `config.json.example`.
 
@@ -71,25 +77,25 @@ Example using ipmitool:
 
 ```bash
 # Get power status
-ipmitool -I lanplus -H <vm-ip> -p 623 -U admin -P password power status
+ipmitool -I lan -H <vm-ip> -p 623 -U admin -P password power status
 
 # Power on VM
-ipmitool -I lanplus -H <vm-ip> -p 623 -U admin -P password power on
+ipmitool -I lan -H <vm-ip> -p 623 -U admin -P password power on
 
 # Power off VM
-ipmitool -I lanplus -H <vm-ip> -p 623 -U admin -P password power off
+ipmitool -I lan -H <vm-ip> -p 623 -U admin -P password power off
 
 # Set boot device to CD/DVD
-ipmitool -I lanplus -H <vm-ip> -p 623 -U admin -P password chassis bootdev cdrom
+ipmitool -I lan -H <vm-ip> -p 623 -U admin -P password chassis bootdev cdrom
 
 # Set boot device to PXE
-ipmitool -I lanplus -H <vm-ip> -p 623 -U admin -P password chassis bootdev pxe
+ipmitool -I lan -H <vm-ip> -p 623 -U admin -P password chassis bootdev pxe
 
 # Set boot device to HDD
-ipmitool -I lanplus -H <vm-ip> -p 623 -U admin -P password chassis bootdev disk
+ipmitool -I lan -H <vm-ip> -p 623 -U admin -P password chassis bootdev disk
 
 # Set boot device to floppy
-ipmitool -I lanplus -H <vm-ip> -p 623 -U admin -P password chassis bootdev floppy
+ipmitool -I lan -H <vm-ip> -p 623 -U admin -P password chassis bootdev floppy
 ```
 
 ### Supported Boot Devices
