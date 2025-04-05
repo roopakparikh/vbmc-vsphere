@@ -53,7 +53,7 @@ func main() {
 	log := logrus.New()
 	log.SetLevel(cfg.GetLogLevel())
 	log.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp: true,
+		FullTimestamp:   true,
 		TimestampFormat: "2006-01-02 15:04:05",
 	})
 	log.Info("Starting vBMC-vSphere service")
@@ -97,23 +97,61 @@ func main() {
 		log.Fatalf("Failed to parse netmask: %s", cfg.Server.Network.Netmask)
 	}
 
-	// Track used IPs to avoid conflicts
-	usedIPs := make(map[string]bool)
+	// Initialize IP database
+	ipdb, err := config.NewIPDB("/var/lib/vbmc-vsphere/ipdb.json")
+	if err != nil {
+		log.Fatalf("Failed to initialize IP database: %v", err)
+	}
+
+	// Create a map of existing VMs for cleanup
+	existingVMs := make(map[string]bool)
+	for _, vm := range vms {
+		existingVMs[vm.Reference().Value] = true
+	}
+
+	// Cleanup stale entries
+	if err := ipdb.Cleanup(existingVMs); err != nil {
+		log.Errorf("Failed to cleanup IP database: %v", err)
+	}
+
+	// Get currently assigned IPs
+	usedIPs, err := ipdb.GetAssignedIPs()
+	if err != nil {
+		log.Errorf("Failed to get assigned IPs: %v", err)
+		return
+	}
 
 	currentIP := make(net.IP, len(startIP))
 	copy(currentIP, startIP)
 
 	for i, vm := range vms {
-		// Check if IP is already in use
-		ipStr := currentIP.String()
-		for usedIPs[ipStr] {
-			incrementIP(currentIP)
-			ipStr = currentIP.String()
-			if currentIP.Equal(endIP) {
-				log.Fatalf("No more available IPs in range")
+		vmID := vm.Reference().Value
+		// Check if VM already has an assigned IP
+		assignedIP, exists, err := ipdb.GetIP(vmID)
+if err != nil {
+			log.Errorf("Failed to get IP for VM %s: %v", vmID, err)
+			return
+		}
+if exists {
+			log.Debugf("Using previously assigned IP %s for VM %s", assignedIP, vm.Name())
+			currentIP = net.ParseIP(assignedIP)
+		} else {
+			// Find next available IP
+			ipStr := currentIP.String()
+			for usedIPs[ipStr] {
+				incrementIP(currentIP)
+				ipStr = currentIP.String()
+				if currentIP.Equal(endIP) {
+					log.Fatalf("No more available IPs in range")
+				}
+			}
+			usedIPs[ipStr] = true
+
+			// Save the IP assignment
+			if err := ipdb.AssignIP(vmID, ipStr); err != nil {
+				log.Errorf("Failed to save IP assignment for VM %s: %v", vm.Name(), err)
 			}
 		}
-		usedIPs[ipStr] = true
 
 		server := ipmi.NewServer(vm, vsClient, currentIP, netmask, cfg.Server.NIC)
 		servers[i] = server

@@ -5,17 +5,19 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vmware/govmomi/object"
 	"github.com/vbmc-vsphere/vsphere"
+	goipmi "github.com/ooneko/goipmi"
 )
 
 // Server represents an IPMI server instance
 type Server struct {
 	vm       *object.VirtualMachine
 	vsClient *vsphere.Client
-	conn     *net.UDPConn
+	ipmiServer *goipmi.Simulator
 	ip       net.IP
 	netmask  net.IP
 	nic      string
@@ -24,7 +26,7 @@ type Server struct {
 
 // NewServer creates a new IPMI server instance
 func NewServer(vm *object.VirtualMachine, vsClient *vsphere.Client, ip net.IP, netmask net.IP, nic string) *Server {
-	return &Server{
+	s := &Server{
 		vm:       vm,
 		vsClient: vsClient,
 		ip:       ip,
@@ -32,11 +34,128 @@ func NewServer(vm *object.VirtualMachine, vsClient *vsphere.Client, ip net.IP, n
 		nic:      nic,
 		log:      logrus.WithField("vm", vm.Name()),
 	}
+
+	return s
+}
+
+// handleChassisControl handles IPMI chassis control commands
+func (s *Server) handleChassisControl(m *goipmi.Message) goipmi.Response {
+	s.log.Debug("Handling chassis control command")
+
+	// Parse command
+	req := &goipmi.ChassisControlRequest{}
+	if err := m.Request(req); err != nil {
+		s.log.Errorf("Failed to parse chassis control request: %v", err)
+		return goipmi.CompletionCode(0x01)
+	}
+
+	ctx := context.Background()
+	switch req.ChassisControl {
+	case goipmi.ControlPowerDown:
+		s.log.Info("Power down command received")
+		if err := s.vsClient.PowerOffVM(ctx, s.vm); err != nil {
+			s.log.Errorf("Failed to power off VM: %v", err)
+			return goipmi.CompletionCode(0x01)
+		}
+	case goipmi.ControlPowerUp:
+		s.log.Info("Power up command received")
+		if err := s.vsClient.PowerOnVM(ctx, s.vm); err != nil {
+			s.log.Errorf("Failed to power on VM: %v", err)
+			return goipmi.CompletionCode(0x01)
+		}
+	default:
+		s.log.Warnf("Unsupported chassis control command: %v", req.ChassisControl)
+		return goipmi.CompletionCode(0x01)
+	}
+
+	return &goipmi.ChassisControlResponse{CompletionCode: 0x00}
+}
+
+// handleGetChassisStatus handles IPMI get chassis status commands
+func (s *Server) handleGetChassisStatus(m *goipmi.Message) goipmi.Response {
+	s.log.Debug("Getting chassis status")
+
+	ctx := context.Background()
+	powerState, err := s.vsClient.GetVMPowerState(ctx, s.vm)
+	if err != nil {
+		s.log.Errorf("Failed to get power state: %v", err)
+		return goipmi.CompletionCode(0x01)
+	}
+
+	// Return chassis status
+	var powerStateByte byte
+	if powerState == "poweredOn" {
+		powerStateByte = goipmi.SystemPower
+	}
+
+	return &goipmi.ChassisStatusResponse{
+		CompletionCode: 0x00,
+		PowerState:     powerStateByte,
+	}
+}
+
+// handleSetSystemBootOptions handles IPMI set system boot options commands
+func (s *Server) handleSetSystemBootOptions(m *goipmi.Message) goipmi.Response {
+	s.log.Debug("Setting system boot options")
+
+	// Parse boot options
+	req := &goipmi.SetSystemBootOptionsRequest{}
+	if err := m.Request(req); err != nil {
+		s.log.Errorf("Failed to parse boot options request: %v", err)
+		return goipmi.CompletionCode(0x01)
+	}
+
+	// Check if this is a boot flags parameter
+	if req.Param != goipmi.BootParamBootFlags {
+		return &goipmi.SetSystemBootOptionsResponse{CompletionCode: 0x00} // Ignore non-boot flags parameters
+	}
+
+	// Map IPMI boot device to vSphere boot device
+	var bootDevice vsphere.BootDevice
+	switch goipmi.BootDevice(req.Data[1] & 0x3F) { // Mask out persistent/EFI bits
+	case goipmi.BootDeviceNone: // No override
+		return &goipmi.SetSystemBootOptionsResponse{CompletionCode: 0x00}
+	case goipmi.BootDeviceDisk:
+		bootDevice = vsphere.BootDeviceHDD
+	case goipmi.BootDeviceCdrom:
+		bootDevice = vsphere.BootDeviceCDROM
+	case goipmi.BootDevicePxe:
+		bootDevice = vsphere.BootDevicePXE
+	case goipmi.BootDeviceFloppy:
+		bootDevice = vsphere.BootDeviceFloppy
+	default:
+		s.log.Warnf("Unsupported boot device: %v", req.Data[1])
+		return goipmi.CompletionCode(0x01)
+	}
+
+	// Set the boot device
+	ctx := context.Background()
+	if err := s.vsClient.SetNextBoot(ctx, s.vm, bootDevice); err != nil {
+		s.log.Errorf("Failed to set boot device: %v", err)
+		return goipmi.CompletionCode(0x01)
+	}
+
+	return &goipmi.SetSystemBootOptionsResponse{CompletionCode: 0x00}
 }
 
 // Start starts the IPMI server
 // configureIP configures the IP address on the specified network interface
 func (s *Server) configureIP() error {
+	// Check if IP already exists
+	checkCmd := exec.Command("ip", "addr", "show", "dev", s.nic)
+	checkOutput, err := checkCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to check IP configuration on %s: %v - %s", 
+			s.nic, err, string(checkOutput))
+	}
+
+	// Check if our IP is already in the output
+	if strings.Contains(string(checkOutput), s.ip.String()) {
+		s.log.Infof("IP %s already configured on interface %s, skipping configuration", 
+			s.ip.String(), s.nic)
+		return nil
+	}
+
 	// Use ip command to add IP address
 	cmd := exec.Command("ip", "addr", "add", 
 		fmt.Sprintf("%s/%s", s.ip.String(), s.netmask.String()), 
@@ -80,155 +199,43 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to configure IP: %v", err)
 	}
 
-	addr := &net.UDPAddr{
+	addr := net.UDPAddr{
 		Port: 623, // Standard IPMI port
 		IP:   s.ip,
 	}
 
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen on %s:623: %v", s.ip, err)
-	}
-	s.conn = conn
-	s.log.Infof("IPMI server listening on %s:623", s.ip)
+	// Create new IPMI simulator
+	s.ipmiServer = goipmi.NewSimulator(addr)
 
-	go s.handleConnections(ctx)
+	// Register handlers for chassis operations
+	s.ipmiServer.SetHandler(goipmi.NetworkFunctionChassis, goipmi.CommandChassisControl, s.handleChassisControl)
+	s.ipmiServer.SetHandler(goipmi.NetworkFunctionChassis, goipmi.CommandChassisStatus, s.handleGetChassisStatus)
+	s.ipmiServer.SetHandler(goipmi.NetworkFunctionChassis, goipmi.CommandSetSystemBootOptions, s.handleSetSystemBootOptions)
+
+	// Start the simulator
+	if err := s.ipmiServer.Run(); err != nil {
+		return fmt.Errorf("failed to start IPMI simulator: %v", err)
+	}
+
+	s.log.Infof("IPMI simulator listening on %s:623", s.ip)
 	return nil
 }
 
-func (s *Server) handleConnections(ctx context.Context) {
-	buffer := make([]byte, 1024)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			n, remoteAddr, err := s.conn.ReadFromUDP(buffer)
-			if err != nil {
-				s.log.Errorf("Failed to read from UDP: %v", err)
-				continue
-			}
 
-			go s.handleIPMIRequest(ctx, buffer[:n], remoteAddr)
-		}
-	}
-}
 
-func (s *Server) handleIPMIRequest(ctx context.Context, data []byte, remoteAddr *net.UDPAddr) {
-	s.log.Debugf("Received IPMI request from %s, length: %d bytes", remoteAddr.String(), len(data))
-
-	// Basic IPMI message parsing
-	if len(data) < 4 {
-		s.log.Errorf("Invalid IPMI message from %s: too short (%d bytes)", remoteAddr.String(), len(data))
-		return
-	}
-
-	// IPMI message parsing
-	if len(data) < 5 { // Need at least 5 bytes for command and parameters
-		s.log.Error("Invalid IPMI message: too short")
-		return
-	}
-
-	// Extract IPMI command and parameters
-	command := data[3]
-	params := data[4:]
-
-	response := s.processIPMICommand(ctx, command, params)
-
-	// Send response
-	_, err := s.conn.WriteToUDP(response, remoteAddr)
-	if err != nil {
-		s.log.Errorf("Failed to send response: %v", err)
-	}
-}
-
-func (s *Server) processIPMICommand(ctx context.Context, command byte, params []byte) []byte {
-	s.log.Debugf("Processing IPMI command: 0x%02x with %d parameter bytes", command, len(params))
-
-	switch command {
-	case 0x01: // Get Device ID
-		return []byte{0x00, 0x01, 0x00, 0x00} // Simple response
-
-	case 0x02: // Get Power State
-		s.log.Debug("Getting VM power state")
-		powerState, err := s.vsClient.GetVMPowerState(ctx, s.vm)
-		s.log.Debugf("VM power state: %s", powerState)
-		if err != nil {
-			s.log.Errorf("Failed to get power state: %v", err)
-			return []byte{0x01} // Error response
-		}
-		if powerState == "poweredOn" {
-			return []byte{0x00, 0x01} // Powered on
-		}
-		return []byte{0x00, 0x00} // Powered off
-
-	case 0x03: // Power On
-		err := s.vsClient.PowerOnVM(ctx, s.vm)
-		if err != nil {
-			s.log.Errorf("Failed to power on VM: %v", err)
-			return []byte{0x01} // Error response
-		}
-		return []byte{0x00} // Success
-
-	case 0x04: // Power Off
-		err := s.vsClient.PowerOffVM(ctx, s.vm)
-		if err != nil {
-			s.log.Errorf("Failed to power off VM: %v", err)
-			return []byte{0x01} // Error response
-		}
-		return []byte{0x00} // Success
-
-	case 0x08: // Set Boot Device
-		if len(params) < 1 {
-			s.log.Error("Invalid boot device command: no parameters")
-			return []byte{0x01} // Error response
-		}
-
-		// Map IPMI boot device to vSphere boot device
-		var bootDevice vsphere.BootDevice
-		switch params[0] & 0x3F { // Mask out persistent/EFI bits
-		case 0x00: // No override
-			return []byte{0x00} // Success
-		case 0x04: // Boot from HDD
-			bootDevice = vsphere.BootDeviceHDD
-		case 0x14: // Boot from CD/DVD
-			bootDevice = vsphere.BootDeviceCDROM
-		case 0x20: // Boot from PXE
-			bootDevice = vsphere.BootDevicePXE
-		case 0x3C: // Boot from Floppy
-			bootDevice = vsphere.BootDeviceFloppy
-		default:
-			s.log.Warnf("Unsupported boot device: %02x", params[0])
-			return []byte{0x01} // Error response
-		}
-
-		// Set the boot device
-		err := s.vsClient.SetNextBoot(ctx, s.vm, bootDevice)
-		if err != nil {
-			s.log.Errorf("Failed to set boot device: %v", err)
-			return []byte{0x01} // Error response
-		}
-		return []byte{0x00} // Success
-
-	default:
-		s.log.Warnf("Unsupported IPMI command: %02x", command)
-		return []byte{0x01} // Error response
-	}
-}
 
 // Stop stops the IPMI server
 func (s *Server) Stop() error {
-	// First close the connection
-	if s.conn != nil {
-		if err := s.conn.Close(); err != nil {
-			s.log.Errorf("Failed to close connection: %v", err)
-		}
+	// Stop the IPMI simulator
+	if s.ipmiServer != nil {
+		s.ipmiServer.Stop()
 	}
 
-	// Then remove the IP address
+	// Clean up the IP configuration
 	if err := s.cleanupIP(); err != nil {
-		return fmt.Errorf("failed to cleanup IP: %v", err)
+		return fmt.Errorf("failed to cleanup IP configuration: %v", err)
 	}
 
+	s.log.Info("IPMI server stopped")
 	return nil
 }
