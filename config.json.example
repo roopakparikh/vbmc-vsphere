@@ -1,15 +1,23 @@
 {
     "vcenter": {
-        "ip": "vcenter.example.com",
-        "user": "administrator@vsphere.local",
-        "password": "your-password",
-        "datacenter": "your-datacenter",
-        "folder": "optional/folder/path"
+        "ip": "vcenter.somwhere.net",
+        "user": "xxx@xxx.com",
+        "password": "xxxxxx",
+        "datacenter": "DC1",
+        "folder": "/Engineering/yourfolder"
     },
     "server": {
         "ip_range": {
             "start": "192.168.1.100",
             "end": "192.168.1.200"
+        },
+        "nic": "ens33",
+        "network": {
+            "netmask": "255.255.255.0",
+            "gateway": "192.168.1.1"
         }
+    },
+    "logging": {
+        "level": "debug"
     }
 }

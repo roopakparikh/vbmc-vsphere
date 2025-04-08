@@ -46,46 +46,46 @@ func (s *Server) handleChassisControl(m *goipmi.Message) goipmi.Response {
 	req := &goipmi.ChassisControlRequest{}
 	if err := m.Request(req); err != nil {
 		s.log.Errorf("Failed to parse chassis control request: %v", err)
-		return goipmi.CompletionCode(0x01)
+		return goipmi.ErrInvalidCommand
 	}
 
 	ctx := context.Background()
 	switch req.ChassisControl {
-	case 0x00: // PowerDown
+	case goipmi.ControlPowerDown: // PowerDown
 		s.log.Info("Power down command received")
 		if err := s.vsClient.PowerOffVM(ctx, s.vm); err != nil {
 			s.log.Errorf("Failed to power off VM: %v", err)
-			return goipmi.CompletionCode(0x01)
+			return goipmi.ErrUnspecified
 		}
-	case 0x01: // PowerUp
+	case goipmi.ControlPowerUp: // PowerUp
 		s.log.Info("Power up command received")
 		if err := s.vsClient.PowerOnVM(ctx, s.vm); err != nil {
 			s.log.Errorf("Failed to power on VM: %v", err)
-			return goipmi.CompletionCode(0x01)
+			return goipmi.ErrUnspecified
 		}
-	case 0x03: // HardReset
+	case goipmi.ControlPowerHardReset: // HardReset
 		s.log.Info("Reset command received")
 		if err := s.vsClient.ResetVM(ctx, s.vm); err != nil {
 			s.log.Errorf("Failed to reset VM: %v", err)
-			return goipmi.CompletionCode(0x01)
+			return goipmi.ErrUnspecified
 		}
-	case 0x02: // PowerCycle
+	case goipmi.ControlPowerCycle: // PowerCycle
 		s.log.Info("Power cycle command received")
 		// Power cycle is implemented as power off followed by power on
 		if err := s.vsClient.PowerOffVM(ctx, s.vm); err != nil {
 			s.log.Errorf("Failed to power off VM during cycle: %v", err)
-			return goipmi.CompletionCode(0x01)
+			return goipmi.ErrUnspecified
 		}
 		if err := s.vsClient.PowerOnVM(ctx, s.vm); err != nil {
 			s.log.Errorf("Failed to power on VM during cycle: %v", err)
-			return goipmi.CompletionCode(0x01)
+			return goipmi.ErrUnspecified
 		}
 	default:
 		s.log.Warnf("Unsupported chassis control command: %v", req.ChassisControl)
-		return goipmi.CompletionCode(0x01)
+		return goipmi.ErrInvalidCommand
 	}
 
-	return &goipmi.ChassisControlResponse{CompletionCode: 0x00}
+	return goipmi.CommandCompleted	
 }
 
 // handleGetChassisStatus handles IPMI get chassis status commands
@@ -96,7 +96,7 @@ func (s *Server) handleGetChassisStatus(m *goipmi.Message) goipmi.Response {
 	powerState, err := s.vsClient.GetVMPowerState(ctx, s.vm)
 	if err != nil {
 		s.log.Errorf("Failed to get power state: %v", err)
-		return goipmi.CompletionCode(0x01)
+		return goipmi.ErrUnspecified
 	}
 
 	// Return chassis status
@@ -106,7 +106,7 @@ func (s *Server) handleGetChassisStatus(m *goipmi.Message) goipmi.Response {
 	}
 
 	return &goipmi.ChassisStatusResponse{
-		CompletionCode: 0x00,
+		CompletionCode: goipmi.CommandCompleted,
 		PowerState:     powerStateByte,
 	}
 }
@@ -119,19 +119,19 @@ func (s *Server) handleSetSystemBootOptions(m *goipmi.Message) goipmi.Response {
 	req := &goipmi.SetSystemBootOptionsRequest{}
 	if err := m.Request(req); err != nil {
 		s.log.Errorf("Failed to parse boot options request: %v", err)
-		return goipmi.CompletionCode(0x01)
+		return goipmi.ErrUnspecified
 	}
 
 	// Check if this is a boot flags parameter
 	if req.Param != goipmi.BootParamBootFlags {
-		return &goipmi.SetSystemBootOptionsResponse{CompletionCode: 0x00} // Ignore non-boot flags parameters
+		return &goipmi.SetSystemBootOptionsResponse{CompletionCode: goipmi.CommandCompleted} // Ignore non-boot flags parameters
 	}
 
 	// Map IPMI boot device to vSphere boot device
 	var bootDevice vsphere.BootDevice
-	switch goipmi.BootDevice(req.Data[1] & 0x3F) { // Mask out persistent/EFI bits
+	switch goipmi.BootDevice(req.Data[1]) { // Mask out persistent/EFI bits
 	case goipmi.BootDeviceNone: // No override
-		return &goipmi.SetSystemBootOptionsResponse{CompletionCode: 0x00}
+		return &goipmi.SetSystemBootOptionsResponse{CompletionCode: goipmi.CommandCompleted}
 	case goipmi.BootDeviceDisk:
 		bootDevice = vsphere.BootDeviceHDD
 	case goipmi.BootDeviceCdrom:
@@ -142,17 +142,17 @@ func (s *Server) handleSetSystemBootOptions(m *goipmi.Message) goipmi.Response {
 		bootDevice = vsphere.BootDeviceFloppy
 	default:
 		s.log.Warnf("Unsupported boot device: %v", req.Data[1])
-		return goipmi.CompletionCode(0x01)
+		return goipmi.ErrInvalidObjCommand
 	}
 
 	// Set the boot device
 	ctx := context.Background()
 	if err := s.vsClient.SetNextBoot(ctx, s.vm, bootDevice); err != nil {
 		s.log.Errorf("Failed to set boot device: %v", err)
-		return goipmi.CompletionCode(0x01)
+		return goipmi.ErrUnspecified
 	}
 
-	return &goipmi.SetSystemBootOptionsResponse{CompletionCode: 0x00}
+	return &goipmi.SetSystemBootOptionsResponse{CompletionCode: goipmi.CommandCompleted}
 }
 
 // Start starts the IPMI server
@@ -237,8 +237,6 @@ func (s *Server) Start(ctx context.Context) error {
 	s.log.Infof("IPMI simulator listening on %s:623", s.ip)
 	return nil
 }
-
-
 
 
 // Stop stops the IPMI server
