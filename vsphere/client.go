@@ -107,6 +107,15 @@ func (c *Client) PowerOffVM(ctx context.Context, vm *object.VirtualMachine) erro
 	return task.Wait(ctx)
 }
 
+// ResetVM performs a hard reset of a VM
+func (c *Client) ResetVM(ctx context.Context, vm *object.VirtualMachine) error {
+	task, err := vm.Reset(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to reset VM: %v", err)
+	}
+	return task.Wait(ctx)
+}
+
 // BootDevice represents a VM boot device
 type BootDevice string
 

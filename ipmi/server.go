@@ -51,16 +51,33 @@ func (s *Server) handleChassisControl(m *goipmi.Message) goipmi.Response {
 
 	ctx := context.Background()
 	switch req.ChassisControl {
-	case goipmi.ControlPowerDown:
+	case 0x00: // PowerDown
 		s.log.Info("Power down command received")
 		if err := s.vsClient.PowerOffVM(ctx, s.vm); err != nil {
 			s.log.Errorf("Failed to power off VM: %v", err)
 			return goipmi.CompletionCode(0x01)
 		}
-	case goipmi.ControlPowerUp:
+	case 0x01: // PowerUp
 		s.log.Info("Power up command received")
 		if err := s.vsClient.PowerOnVM(ctx, s.vm); err != nil {
 			s.log.Errorf("Failed to power on VM: %v", err)
+			return goipmi.CompletionCode(0x01)
+		}
+	case 0x03: // HardReset
+		s.log.Info("Reset command received")
+		if err := s.vsClient.ResetVM(ctx, s.vm); err != nil {
+			s.log.Errorf("Failed to reset VM: %v", err)
+			return goipmi.CompletionCode(0x01)
+		}
+	case 0x02: // PowerCycle
+		s.log.Info("Power cycle command received")
+		// Power cycle is implemented as power off followed by power on
+		if err := s.vsClient.PowerOffVM(ctx, s.vm); err != nil {
+			s.log.Errorf("Failed to power off VM during cycle: %v", err)
+			return goipmi.CompletionCode(0x01)
+		}
+		if err := s.vsClient.PowerOnVM(ctx, s.vm); err != nil {
+			s.log.Errorf("Failed to power on VM during cycle: %v", err)
 			return goipmi.CompletionCode(0x01)
 		}
 	default:
