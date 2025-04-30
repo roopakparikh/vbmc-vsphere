@@ -17,7 +17,7 @@ import (
 type Server struct {
 	vm       *object.VirtualMachine
 	vsClient *vsphere.Client
-	ipmiServer *goipmi.Simulator
+	ipmiServer *IPMI2Simulator
 	ip       net.IP
 	netmask  net.IP
 	nic      string
@@ -216,28 +216,21 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to configure IP: %v", err)
 	}
 
-	addr := net.UDPAddr{
-		Port: 623, // Standard IPMI port
-		IP:   s.ip,
-	}
+	// Create IPMI server
+	s.ipmiServer = NewIPMI2Simulator(s.ip)
 
-	// Create new IPMI simulator
-	s.ipmiServer = goipmi.NewSimulator(addr)
-
-	// Register handlers for chassis operations
+	// Register handlers
 	s.ipmiServer.SetHandler(goipmi.NetworkFunctionChassis, goipmi.CommandChassisControl, s.handleChassisControl)
 	s.ipmiServer.SetHandler(goipmi.NetworkFunctionChassis, goipmi.CommandChassisStatus, s.handleGetChassisStatus)
 	s.ipmiServer.SetHandler(goipmi.NetworkFunctionChassis, goipmi.CommandSetSystemBootOptions, s.handleSetSystemBootOptions)
 
-	// Start the simulator
-	if err := s.ipmiServer.Run(); err != nil {
-		return fmt.Errorf("failed to start IPMI simulator: %v", err)
+	// Start server
+	if err := s.ipmiServer.Start(); err != nil {
+		return fmt.Errorf("failed to start IPMI server: %v", err)
 	}
 
-	s.log.Infof("IPMI simulator listening on %s:623", s.ip)
 	return nil
 }
-
 
 // Stop stops the IPMI server
 func (s *Server) Stop() error {

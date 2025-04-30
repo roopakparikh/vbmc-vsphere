@@ -128,11 +128,11 @@ func main() {
 		vmID := vm.Reference().Value
 		// Check if VM already has an assigned IP
 		assignedIP, exists, err := ipdb.GetIP(vmID)
-if err != nil {
+		if err != nil {
 			log.Errorf("Failed to get IP for VM %s: %v", vmID, err)
 			return
 		}
-if exists {
+		if exists {
 			log.Debugf("Using previously assigned IP %s for VM %s", assignedIP, vm.Name())
 			currentIP = net.ParseIP(assignedIP)
 		} else {
