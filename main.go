@@ -12,7 +12,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/vbmc-vsphere/config"
-	"github.com/vbmc-vsphere/ipmi"
+	"github.com/vbmc-vsphere/bmc"
 	"github.com/vbmc-vsphere/vsphere"
 )
 
@@ -50,12 +50,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logrus.New()
-	log.SetLevel(cfg.GetLogLevel())
-	log.SetFormatter(&logrus.TextFormatter{
+	logrus.SetLevel(cfg.GetLogLevel())
+	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp:   true,
 		TimestampFormat: "2006-01-02 15:04:05",
 	})
+	log := logrus.New()
 	log.Info("Starting vBMC-vSphere service")
 	log.Infof("Using config file: %s", *configFile)
 
@@ -87,9 +87,9 @@ func main() {
 		log.Fatalf("Not enough IP addresses in range for all VMs. Need %d, have %d", len(vms), ipCount)
 	}
 
-	// Create IPMI servers for each VM
+	// Create BMC servers for each VM
 	var wg sync.WaitGroup
-	servers := make([]*ipmi.Server, len(vms))
+	servers := make([]*bmc.Server, len(vms))
 
 	// Parse netmask
 	netmask := net.ParseIP(cfg.Server.Network.Netmask)
@@ -153,14 +153,14 @@ func main() {
 			}
 		}
 
-		server := ipmi.NewServer(vm, vsClient, currentIP, netmask, cfg.Server.NIC)
+		server := bmc.NewServer(vm, vsClient, currentIP, netmask, cfg.Server.NIC)
 		servers[i] = server
 
 		wg.Add(1)
-		go func(s *ipmi.Server) {
+		go func(s *bmc.Server) {
 			defer wg.Done()
 			if err := s.Start(ctx); err != nil {
-				log.Errorf("Failed to start IPMI server: %v", err)
+				log.Errorf("Failed to start BMC server: %v", err)
 			}
 		}(server)
 
